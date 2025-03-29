@@ -3,6 +3,7 @@ import tensorflow as tf
 import numpy as np
 import json
 import logging
+import gdown
 import os
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
@@ -40,7 +41,6 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Load the trained model and class labels
 tf_loaded = False
-model = None
 CLASS_LABELS = None
 analysis = {}
 
@@ -69,25 +69,19 @@ class CropAnalysisRequest(BaseModel):
 class StateInput(BaseModel):
     state: str
 
-# Load TensorFlow model dynamically
-@app.get("/load-tf/")
-async def load_tensorflow():
-    global tf_loaded, model, CLASS_LABELS
-    if not tf_loaded:
-        try:
-            model_url = "https://raw.githubusercontent.com/papichoolo/cropguard/master/multiclass_inceptionv3.keras"
-            model_path = "multiclass_inceptionv3.keras"
-            response = requests.get(model_url)
-            with open(model_path, "wb") as f:
-                f.write(response.content)
-            model = load_model(model_path)
-            with open("class_labels.json", "r") as f:
-                CLASS_LABELS = json.load(f)
-            tf_loaded = True
-            return {"status": "TensorFlow loaded successfully", "model_loaded": True}
-        except Exception as e:
-            return {"status": "Failed to load TensorFlow", "error": str(e)}
-    return {"status": "TensorFlow already loaded", "model_loaded": True}
+# Google Drive model file ID
+MODEL_URL = "https://drive.google.com/uc?id=1QFCIP39LrewEO8DcWABc3uKrnH_AgKSJ"
+
+def download_model():
+    if not os.path.exists("model.keras"):
+        print("Downloading model...")
+        gdown.download(MODEL_URL, "model.keras", quiet=False)
+
+def load_model():
+    download_model()
+    return tf.keras.models.load_model("model.keras")
+
+model = load_model()
 
 # Health check endpoint
 @app.get("/healthz")
