@@ -41,7 +41,8 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Load the trained model and class labels
 tf_loaded = False
-CLASS_LABELS = None
+with open("class_labels.json", "r") as f:
+     CLASS_LABELS = json.load(f)
 analysis = {}
 
 # TensorFlow GPU memory optimization
@@ -99,35 +100,36 @@ def read_file_as_image(data) -> Tuple[np.ndarray, Tuple[int, int]]:
 async def predict(file: UploadFile = File(...)):
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Uploaded file must be an image")
+
+    if model is None:
+        raise HTTPException(status_code=500, detail="Model is not loaded")
+
+    if not CLASS_LABELS:
+        raise HTTPException(status_code=500, detail="CLASS_LABELS is not defined")
+
     try:
         contents = await file.read()
         image_data, image_size = read_file_as_image(contents)
-        img_batch = np.expand_dims(image_data, 0)
+        img_batch = np.expand_dims(image_data, axis=0)  # Expand dims for model
+
         predictions = model.predict(img_batch, verbose=0)
+        if predictions is None or len(predictions) == 0:
+            raise HTTPException(status_code=500, detail="Invalid model predictions")
+
         predicted_class = CLASS_LABELS[np.argmax(predictions[0])]
         confidence = float(np.max(predictions[0]))
+
         return {"class_name": predicted_class, "confidence": confidence, "image_size": image_size}
+
+    except HTTPException as http_exc:
+        raise http_exc  # Re-raise FastAPI errors
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
-        
-    except HTTPException:
-        # Re-raise HTTP exceptions
-        raise
-        
-    except Exception as e:
-        # Log the full error with traceback
-        import traceback
-        logging.error(f"Prediction error: {str(e)}")
-        logging.error(traceback.format_exc())
-        
-        # Return appropriate error
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal server error: {str(e)}"
-        )
+        logging.error(f"Prediction error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
     finally:
-        # Reset file pointer in case we need to reuse it
-        await file.seek(0)  # Raise an HTTPException with the error message
+        await file.seek(0)  # Reset file pointer  # Raise an HTTPException with the error message
     
 
 
