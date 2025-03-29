@@ -72,6 +72,36 @@ app.add_middleware(
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
 )
+tf_loaded = False
+model = None
+CLASS_LABELS = None
+
+@app.get("/load-tf/")
+async def load_tensorflow():
+    global tf_loaded, model, CLASS_LABELS
+    
+    if not tf_loaded:
+        try:
+            import tensorflow as tf
+            import numpy as np
+            import json
+            
+            # Load model
+            from tensorflow.keras.models import load_model
+            model = load_model("multiclass_inceptionv3.keras")
+            
+            # Load class labels
+            with open("class_labels.json", "r") as f:
+                CLASS_LABELS = json.load(f)
+                
+            tf_loaded = True
+            return {"status": "TensorFlow loaded successfully", "model_loaded": True}
+        except Exception as e:
+            logging.error(f"Failed to load TensorFlow: {str(e)}")
+            return {"status": "Failed to load TensorFlow", "error": str(e)}
+    else:
+        return {"status": "TensorFlow already loaded", "model_loaded": True}
+    
 
 @app.post("/predict/")
 async def predict(file: UploadFile = File(...)):
