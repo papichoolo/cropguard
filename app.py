@@ -36,129 +36,85 @@ else:
 
 dotenv.load_dotenv(override=True)
 GEMINI_API_KEY = os.getenv("GEMINI_KEY")
-
-analysis={}
-
-# Load the trained model
-model = load_model("multiclass_inceptionv3.keras")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# Load the trained model and class labels
+tf_loaded = False
+model = None
+CLASS_LABELS = None
+analysis = {}
+
+# TensorFlow GPU memory optimization
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
+
+# Initialize FastAPI app
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Pydantic request models
 class CropAnalysisRequest(BaseModel):
-    class_name: str  # Renamed 'class' to 'class_name' since 'class' is a reserved keyword
+    class_name: str
     confidence: float
     image_size: list[int]
 
 class StateInput(BaseModel):
     state: str
 
-# Load class labels
-with open("class_labels.json", "r") as f:
-    CLASS_LABELS = json.load(f)
-
-# Define image preprocessing function
-def read_file_as_image(data) -> Tuple[np.ndarray, Tuple[int, int]]:
-    img = Image.open(io.BytesIO(data)).convert('RGB')  # Open the image and convert it to RGB color space
-    img_resized = img.resize((299, 299), resample=Image.BICUBIC)  # Resize the image to 224 x 224
-    image = np.array(img_resized)  # Convert the image to a numpy array
-    return image, img_resized.size  # Return the image and its size
-
-# Initialize FastAPI
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
-    allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
-)
-tf_loaded = False
-model = None
-CLASS_LABELS = None
-
+# Load TensorFlow model dynamically
 @app.get("/load-tf/")
 async def load_tensorflow():
     global tf_loaded, model, CLASS_LABELS
-    
     if not tf_loaded:
         try:
-            import tensorflow as tf
-            import numpy as np
-            import json
-            
-            # Load model
-            from tensorflow.keras.models import load_model
-            model = load_model("multiclass_inceptionv3.keras")
-            
-            # Load class labels
+            model_url = "https://raw.githubusercontent.com/papichoolo/cropguard/master/multiclass_inceptionv3.keras"
+            model_path = "multiclass_inceptionv3.keras"
+            response = requests.get(model_url)
+            with open(model_path, "wb") as f:
+                f.write(response.content)
+            model = load_model(model_path)
             with open("class_labels.json", "r") as f:
                 CLASS_LABELS = json.load(f)
-                
             tf_loaded = True
             return {"status": "TensorFlow loaded successfully", "model_loaded": True}
         except Exception as e:
-            logging.error(f"Failed to load TensorFlow: {str(e)}")
             return {"status": "Failed to load TensorFlow", "error": str(e)}
-    else:
-        return {"status": "TensorFlow already loaded", "model_loaded": True}
-    
+    return {"status": "TensorFlow already loaded", "model_loaded": True}
 
+# Health check endpoint
+@app.get("/healthz")
+async def health_check():
+    return {"status": "ok"}
+
+# Image processing function
+def read_file_as_image(data) -> Tuple[np.ndarray, Tuple[int, int]]:
+    img = Image.open(io.BytesIO(data)).convert('RGB')
+    img_resized = img.resize((299, 299), resample=Image.BICUBIC)
+    return np.array(img_resized), img_resized.size
+
+# Prediction endpoint
 @app.post("/predict/")
 async def predict(file: UploadFile = File(...)):
-    """
-    Endpoint for predicting crop disease from uploaded images.
-    Handles file upload, preprocessing, and model prediction.
-    """
-    # Validate file type
     if not file.content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=400, 
-            detail="Uploaded file must be an image"
-        )
-    
+        raise HTTPException(status_code=400, detail="Uploaded file must be an image")
     try:
-        # Read file with size limit (10MB)
-        MAX_SIZE = 10 * 1024 * 1024  # 10MB
-        contents = await file.read(MAX_SIZE)
-        
-        # Check if file is empty
-        if not contents:
-            raise HTTPException(
-                status_code=400, 
-                detail="Empty file uploaded"
-            )
-        
-        # Process image
-        try:
-            image_data, image_size = read_file_as_image(contents)
-        except Exception as e:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Invalid image format: {str(e)}"
-            )
-        
-        # Create batch and run prediction with timeout handling
+        contents = await file.read()
+        image_data, image_size = read_file_as_image(contents)
         img_batch = np.expand_dims(image_data, 0)
-        
-        # Make prediction - adding timeout protection
-        try:
-            predictions = model.predict(img_batch, verbose=0)
-        except Exception as e:
-            raise HTTPException(
-                status_code=500, 
-                detail=f"Model prediction failed: {str(e)}"
-            )
-        
-        # Get results
+        predictions = model.predict(img_batch, verbose=0)
         predicted_class = CLASS_LABELS[np.argmax(predictions[0])]
         confidence = float(np.max(predictions[0]))
-        
-        # Return prediction
-        return {
-            'class_name': predicted_class,
-            'confidence': confidence,
-            'image_size': image_size
-        }
+        return {"class_name": predicted_class, "confidence": confidence, "image_size": image_size}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
         
     except HTTPException:
         # Re-raise HTTP exceptions
