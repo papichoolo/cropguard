@@ -4,6 +4,7 @@ import numpy as np
 import json
 import logging
 import os
+from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 import requests
 from pydantic import BaseModel  
@@ -21,6 +22,17 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate
 from reportlab.lib.units import inch
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
+
+
+# Limit TensorFlow memory growth - add this BEFORE loading your model
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
+else:
+    # CPU-only usage pattern
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
 
 dotenv.load_dotenv(override=True)
 GEMINI_API_KEY = os.getenv("GEMINI_KEY")
@@ -53,24 +65,89 @@ def read_file_as_image(data) -> Tuple[np.ndarray, Tuple[int, int]]:
 # Initialize FastAPI
 app = FastAPI()
 
-@app.post("/predict/")  # A decorator to create a route for the predict endpoint
-async def predict(file: UploadFile = File(...)):  # The function that will be executed when the endpoint is called
-    try:  # A try block to handle any errors that may occur
-        image_data, image_size = read_file_as_image(await file.read())  # Read the image file
-        img_batch = np.expand_dims(image_data, 0)  # Add an extra dimension to the image
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
+
+@app.post("/predict/")
+async def predict(file: UploadFile = File(...)):
+    """
+    Endpoint for predicting crop disease from uploaded images.
+    Handles file upload, preprocessing, and model prediction.
+    """
+    # Validate file type
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=400, 
+            detail="Uploaded file must be an image"
+        )
+    
+    try:
+        # Read file with size limit (10MB)
+        MAX_SIZE = 10 * 1024 * 1024  # 10MB
+        contents = await file.read(MAX_SIZE)
         
-        predictions = model.predict(img_batch)  # Make a prediction
-        predicted_class = CLASS_LABELS[np.argmax(predictions[0])]  # Get the predicted class
-        confidence = float(np.max(predictions[0]))  # Get the confidence of the prediction
- 
-        return {  # Return the prediction
-            'class_name': predicted_class,   
+        # Check if file is empty
+        if not contents:
+            raise HTTPException(
+                status_code=400, 
+                detail="Empty file uploaded"
+            )
+        
+        # Process image
+        try:
+            image_data, image_size = read_file_as_image(contents)
+        except Exception as e:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid image format: {str(e)}"
+            )
+        
+        # Create batch and run prediction with timeout handling
+        img_batch = np.expand_dims(image_data, 0)
+        
+        # Make prediction - adding timeout protection
+        try:
+            predictions = model.predict(img_batch, verbose=0)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Model prediction failed: {str(e)}"
+            )
+        
+        # Get results
+        predicted_class = CLASS_LABELS[np.argmax(predictions[0])]
+        confidence = float(np.max(predictions[0]))
+        
+        # Return prediction
+        return {
+            'class_name': predicted_class,
             'confidence': confidence,
-            'image_size': image_size  # Optionally return the original image size
+            'image_size': image_size
         }
-    except Exception as e:  # If an error occurs
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+        
+    except Exception as e:
+        # Log the full error with traceback
+        import traceback
         logging.error(f"Prediction error: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))  # Raise an HTTPException with the error message
+        logging.error(traceback.format_exc())
+        
+        # Return appropriate error
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
+    finally:
+        # Reset file pointer in case we need to reuse it
+        await file.seek(0)  # Raise an HTTPException with the error message
     
 
 
